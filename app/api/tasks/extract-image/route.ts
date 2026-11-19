@@ -2,7 +2,7 @@ import { requireUser, reply, apiError } from "@/lib/api";
 import { databaseError } from "@/lib/task-store";
 import { processImageExtraction, ExtractionLimitError } from "@/lib/image-extraction";
 import { HttpError } from "@/lib/http";
-import { reserveScreenshot } from "@/lib/ai-admission";
+import { isScreenshotExempt, ownerScreenshotAccess, reserveScreenshot } from "@/lib/ai-admission";
 export const runtime = "nodejs";
 export const maxDuration = 45;
 export async function POST(request: Request) {
@@ -10,7 +10,10 @@ export async function POST(request: Request) {
     return reply(await processImageExtraction(request, {
       enabled: process.env.SCREENSHOT_AI_ENABLED === "true", apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_IMAGE_MODEL, timezone: process.env.APP_TIMEZONE,
       authorize: async () => {
-        const { supabase } = await requireUser();
+        const { supabase, user } = await requireUser();
+        if (isScreenshotExempt(user.id, process.env.RATE_LIMIT_EXEMPT_USER_IDS)) {
+          return ownerScreenshotAccess(supabase, user.id, request);
+        }
         return { reserve: () => reserveScreenshot(supabase, request, process.env.AUTH_RECOVERY_SECRET), consumeSlot: async () => {
           const limit = await supabase.rpc("consume_import_slot");
           databaseError(limit.error);

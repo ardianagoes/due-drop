@@ -1,15 +1,17 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { CATEGORIES, isTask, localDay, safeUrl, type Category, type Task } from "./tasks";
 
-export const REVIEW_FIELDS = ["name", "dueDate", "dueTime", "timezone", "usefulUrl"] as const;
+export const MAX_SCREENSHOT_ASSIGNMENTS = 12;
+export const REVIEW_FIELDS = ["name", "dueDate", "dueTime", "timezone", "usefulUrl", "course"] as const;
 export type ReviewField = typeof REVIEW_FIELDS[number];
 export type Candidate = {
   name: string | null; dueDate: string | null; dueTime: string | null; timezone: string | null;
+  course?: string | null;
   category: Category; usefulUrl: string | null; uncertainFields: ReviewField[]; notes: string[];
   dateKind: "explicit" | "relative" | "inferred" | "unknown"; dateExpression: string | null;
 };
 export type Extraction = { candidates: Candidate[]; notes: string[]; referenceDate: string; referenceTimezone: string };
-export type AssignmentDraft = { name: string; dueDate: string; dueTime: string; timezone: string; category: Category; urls: string; allDay: boolean };
+export type AssignmentDraft = { name: string; course?: string; dueDate: string; dueTime: string; timezone: string; category: Category; urls: string; allDay: boolean };
 export function blankExtraction(timezone = "America/New_York", now = new Date()): Extraction {
   return { referenceDate: referenceDay(now, timezone), referenceTimezone: timezone, notes: [], candidates: [{
     name: null, dueDate: null, dueTime: null, timezone: null, category: "Homework", usefulUrl: null,
@@ -49,16 +51,18 @@ export function parseExtraction(value: unknown, referenceDate: string, reference
   const notesValid = (notes: unknown): notes is string[] => Array.isArray(notes) && notes.length <= 8 && notes.every(note => typeof note === "string" && note.length <= 300);
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid();
   const data = value as Record<string, unknown>;
-  if (Object.keys(data).length !== 2 || !Array.isArray(data.candidates) || data.candidates.length > 5 || !notesValid(data.notes)) throw invalid();
+  if (Object.keys(data).length !== 2 || !Array.isArray(data.candidates) || data.candidates.length > MAX_SCREENSHOT_ASSIGNMENTS || !notesValid(data.notes)) throw invalid();
   const candidates = data.candidates.map((entry: unknown): Candidate => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw invalid();
     const item = entry as Record<string, unknown>;
-    const keys = [...REVIEW_FIELDS, "category", "uncertainFields", "notes", "dateKind", "dateExpression"];
+    // Older deployments can still return candidates without a course field.
+    const keys = [...REVIEW_FIELDS.filter(field => field !== "course" || Object.hasOwn(item, field)), "category", "uncertainFields", "notes", "dateKind", "dateExpression"];
     if (Object.keys(item).length !== keys.length || keys.some(key => !(key in item))) throw invalid();
     const nullable = (key: string, max: number) => item[key] === null || (typeof item[key] === "string" && item[key].length <= max && item[key].trim().length > 0);
-    if (!nullable("name", 200) || !nullable("dueDate", 10) || !nullable("dueTime", 5) || !nullable("timezone", 100) || !nullable("usefulUrl", 4096) || !nullable("dateExpression", 200) ||
+    if (!nullable("name", 200) || (Object.hasOwn(item, "course") && !nullable("course", 160)) ||
+      !nullable("dueDate", 10) || !nullable("dueTime", 5) || !nullable("timezone", 100) || !nullable("usefulUrl", 4096) || !nullable("dateExpression", 200) ||
       !CATEGORIES.includes(item.category as Category) || !["explicit", "relative", "inferred", "unknown"].includes(String(item.dateKind)) ||
-      !Array.isArray(item.uncertainFields) || item.uncertainFields.length > 5 || item.uncertainFields.some(field => !REVIEW_FIELDS.includes(field)) || !notesValid(item.notes)) throw invalid();
+      !Array.isArray(item.uncertainFields) || item.uncertainFields.length > REVIEW_FIELDS.length || item.uncertainFields.some(field => !REVIEW_FIELDS.includes(field)) || !notesValid(item.notes)) throw invalid();
     if ((item.dueDate && !validCalendarDate(String(item.dueDate))) ||
       (item.dueTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(item.dueTime))) ||
       (item.timezone && !validTimezone(String(item.timezone))) ||
@@ -70,18 +74,23 @@ export function parseExtraction(value: unknown, referenceDate: string, reference
       flag("dueDate"); // Relative wording in an old screenshot may refer to a different day.
     }
     if (result.dateKind === "inferred") flag("dueDate");
+    if (result.dateKind === "explicit" && result.dueDate) {
+      const quotedYears = result.dateExpression?.match(/\b\d{4}\b/g);
+      if (!quotedYears?.includes(result.dueDate.slice(0, 4))) flag("dueDate");
+    }
     if (result.dateKind === "unknown") result.dueDate = null;
     if (!result.name) flag("name");
     if (!result.dueDate) flag("dueDate");
     if (result.uncertainFields.includes("dueTime")) result.dueTime = null;
     if (result.uncertainFields.includes("timezone")) result.timezone = null;
+    if (result.uncertainFields.includes("course")) result.course = null;
     if (result.dueTime && !result.timezone) flag("timezone");
     return result;
   });
   return { candidates, notes: data.notes, referenceDate, referenceTimezone };
 }
 export function draftFromCandidate(value: Candidate, defaultTimezone: string): AssignmentDraft {
-  return { name: value.name || "", dueDate: value.dueDate || "", dueTime: value.dueTime || "",
+  return { name: value.name || "", course: value.course || "", dueDate: value.dueDate || "", dueTime: value.dueTime || "",
     timezone: value.timezone || defaultTimezone, category: value.category, urls: value.usefulUrl || "", allDay: !value.dueTime };
 }
 export function taskFromDraft(draft: AssignmentDraft, id: string): Task {
@@ -99,6 +108,7 @@ export function taskFromDraft(draft: AssignmentDraft, id: string): Task {
   const urls = draft.urls.split(/\s+/).filter(Boolean).map(safeUrl);
   if (urls.some(url => !url)) throw new Error("Use complete http:// or https:// URLs.");
   const task: Task = { id, name: draft.name.trim(), dueAt, allDay: draft.allDay,
+    ...(draft.course?.trim() ? { course: draft.course.trim() } : {}),
     category: draft.category, urls: urls as string[], source: "Manual", status: "To Do" };
   if (!isTask(task)) throw new Error("Check the task fields and URL lengths.");
   return task;

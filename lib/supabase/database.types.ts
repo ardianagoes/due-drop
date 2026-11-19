@@ -2,6 +2,7 @@ export type Json = string | number | boolean | null | { [key: string]: Json | un
 export type TaskRow = {
   user_id: string; id: string; name: string; due_at: string | null; due_date: string | null;
   category: string; status: string; urls: string[]; source: string; created_at: string;
+  course?: string | null;
 };
 type TaskInsert = Omit<TaskRow, "created_at"> & { created_at?: string };
 export type Database = {
@@ -20,6 +21,8 @@ export type Database = {
       migrate_browser_tasks: { Args: { p_tasks: Json; p_key: string }; Returns: Json };
       consume_import_slot: { Args: Record<string, never>; Returns: Json };
       reserve_screenshot: { Args: { p_ip_hash: string; p_request_id: string }; Returns: Json };
+      admit_screenshot_owner: { Args: { p_operation: string; p_ip_hash: string; p_request_id: string; p_expires: number; p_signature: string }; Returns: Json };
+      import_screenshot_tasks: { Args: { p_tasks: Json }; Returns: Json };
     };
     Enums: { [_ in never]: never };
     CompositeTypes: { [_ in never]: never };

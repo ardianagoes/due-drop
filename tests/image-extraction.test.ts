@@ -6,7 +6,7 @@ import { MAX_IMAGE_BYTES, imageFileError } from "../lib/image-limits";
 import { normalizeImage, readImageUpload } from "../lib/image-upload";
 import { processImageExtraction, ExtractionLimitError } from "../lib/image-extraction";
 import { extractWithOpenAI } from "../lib/openai-image";
-import { parseExtraction, relativeDate, referenceDay, draftFromCandidate, taskFromDraft, possibleDuplicate, stableSaveAttempt, type Candidate } from "../lib/assignment-draft";
+import { MAX_SCREENSHOT_ASSIGNMENTS, parseExtraction, relativeDate, referenceDay, draftFromCandidate, taskFromDraft, possibleDuplicate, stableSaveAttempt, type Candidate } from "../lib/assignment-draft";
 
 const origin = "http://127.0.0.1:3000";
 process.env.NEXT_PUBLIC_APP_URL = origin;
@@ -48,10 +48,12 @@ test("inferred years, missing deadlines, date-only tasks and ambiguous details r
     candidate({ dateKind: "inferred", dateExpression: "October 15", dueDate: "2026-10-15", dueTime: null }),
     candidate({ name: null, dateKind: "unknown", dueDate: "2026-10-15", dueTime: null, notes: ["Conflicting deadlines"] }),
     candidate({ timezone: null, dueTime: "17:00" }),
+    candidate({ dateKind: "explicit", dateExpression: "October 12", dueDate: "2026-10-12" }),
   ]).candidates;
   assert.ok(entries[0].uncertainFields.includes("dueDate"));
   assert.equal(entries[1].dueDate, null); assert.ok(entries[1].uncertainFields.includes("name"));
   assert.ok(entries[2].uncertainFields.includes("timezone"));
+  assert.ok(entries[3].uncertainFields.includes("dueDate"), "an explicit label alone cannot confirm an unquoted year");
   const allDay = taskFromDraft(draftFromCandidate(entries[0], context.timezone), "date-only");
   assert.equal(allDay.allDay, true); assert.equal(allDay.dueAt, "2026-10-15");
   assert.equal(allDay.source, "Manual"); assert.equal(allDay.status, "To Do");
@@ -82,7 +84,8 @@ test("server validates every AI field, bounded candidate counts and usable compl
     result([candidate({ dueDate: "2026-02-30" })]), result([candidate({ dueTime: "25:30" })]),
     result([candidate({ category: "Bad" as Candidate["category"] })]), result([candidate({ usefulUrl: "javascript:alert(1)" })]),
     result([candidate({ usefulUrl: "/assignment" })]), result([candidate({ timezone: "Imaginary/Zone" })]),
-    result([candidate({ name: "a".repeat(201) })]), result(Array.from({ length: 6 }, () => candidate())),
+    result([candidate({ name: "a".repeat(201) })]), result(Array.from({ length: MAX_SCREENSHOT_ASSIGNMENTS + 1 }, () => candidate())),
+    result([candidate({ course: "a".repeat(161) })]),
     { candidates: [{}], notes: [] }, { ...result(), instructions: "save automatically" },
   ]) assert.throws(() => parseExtraction(value, context.referenceDate, context.timezone));
 });
@@ -92,7 +95,7 @@ test("general image understanding uses strict output, current context, cost limi
   const fetchMock: typeof fetch = async (url, init) => {
     ++calls; assert.equal(url, "https://api.openai.com/v1/responses");
     const body = JSON.parse(String(init?.body));
-    assert.equal(body.model, "gpt-5.4-mini"); assert.equal(body.store, false); assert.equal(body.max_output_tokens, 2400);
+    assert.equal(body.model, "gpt-5.4-mini"); assert.equal(body.store, false); assert.equal(body.max_output_tokens, 4400);
     assert.deepEqual(body.reasoning, { effort: "none" });
     assert.equal(body.text.format.strict, true); assert.equal(body.tools, undefined);
     assert.match(body.instructions, /ANY screenshot/); assert.match(body.instructions, /UNTRUSTED DATA/);
@@ -109,6 +112,27 @@ test("general image understanding uses strict output, current context, cost limi
   assert.equal(calls, 1); assert.equal(response.candidates.length, 5);
   assert.equal(response.candidates[2].category, "Applications");
   assert.equal(response.candidates[2].dueTime, null);
+});
+
+test("one structured response preserves each portal row's title, course, date and time", async () => {
+  const rows = [
+    ["Project Overview Draft", "2026-12-02"],
+    ["PS31", "2026-11-23"],
+    ["PS30", "2026-11-20"],
+    ["PS28", "2026-11-20"],
+  ];
+  let calls = 0;
+  const response = await extractWithOpenAI(Buffer.from("portal mock"), "mock", context, undefined, async (_url, init) => {
+    calls++;
+    const request = JSON.parse(String(init?.body));
+    assert.match(request.instructions, /same row or card/);
+    assert.ok(request.text.format.schema.properties.candidates.items.required.includes("course"));
+    return provider(result(rows.map(([name, dueDate]) =>
+      candidate({ name, course: "Math 200", dueDate, dueTime: "01:00", dateExpression: `Due ${dueDate} at 1 AM` }))));
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(response.candidates.map(row => [row.name, row.course, row.dueDate, row.dueTime]),
+    rows.map(([name, dueDate]) => [name, "Math 200", dueDate, "01:00"]));
 });
 
 test("provider failure, refusal, incomplete or malformed output never leaks upstream private data", async () => {

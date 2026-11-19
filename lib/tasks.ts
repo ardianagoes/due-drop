@@ -5,6 +5,7 @@ export type Status = typeof STATUSES[number];
 export type Task = {
   id: string;
   name: string;
+  course?: string;
   // Timed deadlines are UTC ISO strings; all-day deadlines are YYYY-MM-DD.
   dueAt: string;
   allDay: boolean;
@@ -62,6 +63,7 @@ export function isTask(value: unknown): value is Task {
     : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(t.dueAt));
   return typeof t.id === "string" && t.id.length > 0 && t.id.length <= 128 &&
     typeof t.name === "string" && t.name.trim().length > 0 && t.name.length <= 200 &&
+    (t.course === undefined || (typeof t.course === "string" && t.course.trim().length > 0 && t.course.length <= 160)) &&
     typeof t.dueAt === "string" && typeof t.allDay === "boolean" &&
     validDate && Number.isFinite(deadlineMillis(t)) && CATEGORIES.includes(t.category) &&
     STATUSES.includes(t.status) && ["Manual", "Canvas", "Gradescope"].includes(t.source) &&
