@@ -3,7 +3,11 @@ import { readImageUpload, normalizeImage } from "./image-upload";
 import { DEFAULT_IMAGE_MODEL, extractWithOpenAI } from "./openai-image";
 import { referenceDay, type Extraction } from "./assignment-draft";
 import type { Admission } from "./ai-admission";
-type Access = { consumeSlot: () => Promise<{ allowed: boolean; retryAfter: number }>; reserve: () => Promise<Admission> };
+type Access = {
+  consumeSlot?: () => Promise<{ allowed: boolean; retryAfter: number }>;
+  reserve: () => Promise<Admission>;
+  complete?: () => Promise<void>;
+};
 export class ExtractionLimitError extends HttpError {
   constructor(public retryAfter: number) { super(429, "Screenshot analysis limit reached. Try later or use Manual Entry."); }
 }
@@ -20,13 +24,16 @@ export async function processImageExtraction(request: Request, dependencies: {
     if (admission.reason === "duplicate") throw new HttpError(409, "This screenshot request was already submitted. Review the existing result or explicitly start a new analysis.");
     throw new ExtractionLimitError(admission.retryAfter);
   }
-  const slot = await access.consumeSlot();
-  if (!slot.allowed) throw new ExtractionLimitError(slot.retryAfter);
+  if (access.consumeSlot) {
+    const slot = await access.consumeSlot();
+    if (!slot.allowed) throw new ExtractionLimitError(slot.retryAfter);
+  }
   const file = await readImageUpload(request);
   const pixels = await normalizeImage(file);
   const timezone = dependencies.timezone || "America/New_York";
   const context = { referenceDate: referenceDay(dependencies.now || new Date(), timezone), timezone };
   const extraction = await (dependencies.extract || extractWithOpenAI)(pixels, dependencies.apiKey, context, dependencies.model || DEFAULT_IMAGE_MODEL, undefined, request.signal);
+  await access.complete?.();
   if (!extraction.candidates.length) throw new HttpError(422, "No task was detected. Try a clearer screenshot or use Manual Entry.");
   // No task-write dependency: only explicit review submission creates tasks.
   return { extraction };

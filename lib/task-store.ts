@@ -16,13 +16,13 @@ export async function updateOwnedTask(supabase: SupabaseClient<Database>, userId
 }
 
 export function toTaskRow(task: Task, userId: string): Omit<TaskRow, "created_at"> {
-  return { user_id: userId, id: task.id, name: task.name.trim(),
+  return { user_id: userId, id: task.id, name: task.name.trim(), ...(task.course ? { course: task.course.trim() } : {}),
     due_at: task.allDay ? null : new Date(task.dueAt).toISOString(),
     due_date: task.allDay ? task.dueAt : null,
     category: task.category, status: task.status, urls: task.urls, source: task.source };
 }
 export function fromTaskRow(row: TaskRow): Task {
-  const task = { id: row.id, name: row.name, dueAt: row.due_date || row.due_at,
+  const task = { id: row.id, name: row.name, dueAt: row.due_date || row.due_at, ...(row.course ? { course: row.course } : {}),
     allDay: row.due_date !== null, category: row.category, status: row.status, urls: row.urls, source: row.source };
   if (!isTask(task)) throw new HttpError(500, "A saved task has invalid data.");
   return task;

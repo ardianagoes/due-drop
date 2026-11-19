@@ -6,6 +6,7 @@ import { browserClient } from "@/lib/supabase/client";
 import { isTask, type Category, type Status, type Task } from "@/lib/tasks";
 import { parseExtraction, validCalendarDate, validTimezone } from "@/lib/assignment-draft";
 import { taskChanges } from "@/lib/task-editing";
+import { isScreenshotImportResult, type ScreenshotImportItem } from "@/lib/screenshot-batch";
 import TaskWorkspace from "./task-workspace";
 import TaskCreator from "./task-creator";
 import WorkspaceShell from "./workspace-shell";
@@ -118,6 +119,24 @@ export default function Dashboard({ user, timezone, screenshotAnalysisEnabled = 
     finally { busy.current = false; setSaving(false); }
   }
 
+  async function importReviewedScreenshot(items: ScreenshotImportItem[]) {
+    if (busy.current) throw new Error("Another save is in progress. Try again.");
+    busy.current = true; setSaving(true); ++readSequence.current;
+    try {
+      const result = await apiRequest("/api/tasks/import-screenshot", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(items),
+      });
+      if (!Array.isArray(result.results) || result.results.length !== items.length ||
+        !result.results.every(isScreenshotImportResult) ||
+        result.results.some((entry: { id: string }, index: number) => entry.id !== items[index].task.id)) {
+        throw new Error("Could not confirm the screenshot import. Try again.");
+      }
+      await loadTasks();
+      setCategory("All");
+      return result.results;
+    } finally { busy.current = false; setSaving(false); }
+  }
+
   async function changeStatus(id: string, status: Status) {
     if (busy.current) return;
     busy.current = true; setSaving(true); ++readSequence.current;
@@ -192,7 +211,9 @@ export default function Dashboard({ user, timezone, screenshotAnalysisEnabled = 
 
   return <WorkspaceShell email={user.email} tasks={tasks} ready={ready} saving={saving} hasError={Boolean(storageError)} now={now}
     category={category} onCategoryChange={setCategory} onSignOut={() => void signOut()}
-    renderCreator={(onBusyChange, initialFiles) => <TaskCreator tasks={tasks} disabled={!ready || saving} analysisEnabled={screenshotAnalysisEnabled} timezone={timezone} onAnalyze={analyzeScreenshot} onSaveTask={saveCreatedTask} onBusyChange={onBusyChange} initialFiles={initialFiles} />}
+    renderCreator={(onBusyChange, initialFiles) => <TaskCreator tasks={tasks} disabled={!ready || saving} analysisEnabled={screenshotAnalysisEnabled}
+      timezone={timezone} onAnalyze={analyzeScreenshot} onSaveTask={saveCreatedTask} onImportScreenshot={importReviewedScreenshot}
+      onBusyChange={onBusyChange} initialFiles={initialFiles} />}
     settings={<section className="settings-section">
       <h3>Calendar imports</h3><p className="mb-5">Connect a private Canvas or Gradescope ICS feed. Import again to refresh deadlines and keep your statuses. New Canvas assignments start today.</p>
       <form onSubmit={importFeed} className="space-y-4 text-sm text-slate-300">

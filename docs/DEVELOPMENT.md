@@ -97,17 +97,102 @@ Images normalize to JPEG within 2048×2048 without enlarging, stripping metadata
 Upload reads time out at ten seconds, image conversion at five, and provider work
 at twenty; the route budget stays 45 seconds. Client cancellation also aborts the
 outbound request, but a provider may still charge for work already accepted.
-One admission makes at most one Responses request: no tools or automatic retries,
-`store:false`, reasoning `none`, 2,400 output tokens, strict JSON and at most five
-candidates. `store:false` does not promise zero provider retention.
+One admission makes at most one Responses request with strict JSON, no tools or
+automatic retries, `store:false`, reasoning `none`, and up to 4,400 output tokens
+for up to 12 assignment candidates. The larger output ceiling accommodates batch
+results. For a longer list, crop remaining rows into another screenshot.
 
-Only explicitly confirmed task fields are saved using the existing task API.
+Only explicitly confirmed task fields are saved. The screenshot import endpoint
+sends one insert-only transaction to Supabase. Manual entry still uses its existing API.
 Screenshots, prompts, provider output, feed tokens and plaintext IPs are not stored
 in the new limiter. It keeps account/request UUIDs, HMAC IP buckets and timestamps
 and prunes records older than 35 days on approved admission attempts. An inactive
 project retains older records until its next approved attempt or owner cleanup;
 there is no scheduled retention job. It does not use account deletion cascades,
 because deleting an account must not reset the global quota.
+
+### Screenshot batch migration and optional owner exemption
+
+1. Apply `supabase/migrations/20261119000001_screenshot_batch_import.sql` after
+   the existing production task migration. It adds an optional course field and
+   an authenticated insert-only RPC. Apply it before using the updated screenshot
+   review, including single-assignment saves. If merging to main starts a Vercel
+   production deployment, run the SQL in the matching Supabase project's SQL
+   Editor before merging. No task backfill is needed.
+2. Leave `RATE_LIMIT_EXEMPT_USER_IDS` empty to keep every account on the regular
+   limiter. To set up an exemption, first verify the existing AI admission SQL
+   in `docs/sql` is installed. Then apply
+   `supabase/migrations/20261119000000_screenshot_owner_limits.sql`. It uses
+   `pgcrypto` in the Supabase `extensions` schema. If the extension is installed
+   elsewhere, review its location with the project owner before proceeding.
+3. In the intended Vercel environment, set server-only `RATE_LIMIT_EXEMPT_USER_IDS`
+   to the comma-separated User UUIDs copied from Supabase **Authentication → Users**.
+   Use only your trusted owner UUID for a personal exemption. The UUID must also
+   be in the existing private `screenshot_ai_policy.allowed_user_ids` AI allowlist.
+4. For that same environment, create a dedicated 32-byte random signing key
+   (`node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`).
+   Set it as server-only `SCREENSHOT_OWNER_SIGNING_KEY` in Vercel. Using an approved
+   admin connection, insert the same 64-character lowercase hex value into
+   `public.screenshot_owner_signing.signing_key` for `singleton = true`. Use a
+   bound parameter where available and keep the value out of version control,
+   browser variables and shared logs. No service-role key is needed. Keep existing
+   secrets as-is. Leave paid AI disabled unless it has already been separately approved.
+
+Verify which functions are installed in **Supabase → SQL Editor**:
+
+```sql
+select
+  to_regprocedure('public.import_screenshot_tasks(jsonb)') is not null as batch_ready,
+  to_regprocedure('public.reserve_screenshot(text,uuid)') is not null as regular_ai_ready,
+  to_regprocedure('public.admit_screenshot_owner(text,text,uuid,integer,text)') is not null as owner_rpc_ready;
+```
+
+`batch_ready` is required for screenshot saves. For the exemption, confirm all
+three are true and check the owner UUID in the private policy. If the owner is
+missing, add only that UUID and keep the other approved accounts:
+
+```sql
+update public.screenshot_ai_policy
+set allowed_user_ids = array_append(allowed_user_ids, 'YOUR_SUPABASE_USER_UUID'::uuid)
+where singleton
+  and array_position(allowed_user_ids, 'YOUR_SUPABASE_USER_UUID'::uuid) is null;
+```
+
+Use the existing Vercel project's **Settings → Environment Variables** to add the
+two server-only owner variables to the intended environment. A new deployment must
+read the updated values. Avoid putting your owner signing key in SQL Editor
+history. With project-owner access, add the singleton row through **Supabase →
+Table Editor → screenshot_owner_signing** or an admin client using a bound
+parameter. Set `singleton = true` and `signing_key` to the exact Vercel value.
+
+The verified owner bypasses the normal screenshot and legacy shared import bucket
+for screenshot analysis. Calendar imports still use their original limits.
+The owner ledger separately counts every admitted attempt and stores account and
+request UUIDs, a hashed IP and lease timestamps. It enforces 30 attempts per UTC
+day and 300 per UTC month across exempt accounts, with one active owner analysis.
+A successful analysis releases its lease immediately. Failed or cancelled work
+keeps the lease until expiry (up to 60 seconds) because the provider may still
+be processing it. These limits count requests. Maintain provider project spend
+limits, alerts and rate limits for dollar exposure.
+
+For duplicate matching, recognized Canvas or Gradescope assignment links are
+compared at the same deadline. Otherwise a normalized title, known matching course
+and exact deadline can confirm a duplicate. A same-title, same-deadline match
+without a course requires review. Older manual and feed tasks may not have course
+metadata. Existing tasks and their edits are preserved. On retry, the same reviewed
+rows retain their IDs, and Supabase serializes duplicate checks for each account.
+
+Manual staging checklist:
+
+- With paid analysis off, verify Manual Entry still saves and screenshot previews
+  stay local. Exercise extraction with a mock or an explicitly approved test account.
+- Review a screenshot with PS28, PS30 and PS31, including two rows with the same due
+  time. Confirm each title stays paired with its own deadline and optional course.
+- Edit a missing or ambiguous date, confirm the correction, select the row, and
+  import the batch. Reimport the same batch and check the existing tasks remain intact.
+- Verify a second account cannot see the first account's tasks. If testing the owner
+  setting, verify the regular user retains normal limits and the owner's attempts
+  appear only in the private owner ledger.
 
 ## Calendar feeds and task compatibility
 

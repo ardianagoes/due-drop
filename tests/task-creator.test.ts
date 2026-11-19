@@ -4,6 +4,7 @@ import { JSDOM } from "jsdom";
 import { act, createElement } from "react";
 import type { Root } from "react-dom/client";
 import type { Task } from "../lib/tasks";
+import type { ScreenshotImportItem, ScreenshotImportResult } from "../lib/screenshot-batch";
 import { parseExtraction, taskFromDraft, draftFromCandidate, type Candidate, type Extraction } from "../lib/assignment-draft";
 import { MAX_IMAGE_BYTES } from "../lib/image-limits";
 
@@ -34,13 +35,20 @@ function extraction(candidates = [candidate()]): Extraction {
   return parseExtraction({ candidates, notes: [] }, "2026-10-07", "America/New_York");
 }
 const file = (type = "image/png", size = 10) => new File([new Uint8Array(size)], "screen.png", { type });
-async function mount(options: { tasks?: Task[]; initialFiles?: File[]; analysisEnabled?: boolean; onAnalyze?: (file: File) => Promise<Extraction>; onSave?: (task: Task) => Promise<void> } = {}) {
+async function mount(options: { tasks?: Task[]; initialFiles?: File[]; analysisEnabled?: boolean; onAnalyze?: (file: File) => Promise<Extraction>; onSave?: (task: Task) => Promise<void>; onImport?: (items: ScreenshotImportItem[]) => Promise<ScreenshotImportResult[]> } = {}) {
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   const saved: Task[] = [], analyzed: File[] = [];
   await act(async () => root.render(createElement(TaskCreator, {
     tasks: options.tasks || [], disabled: false, initialFiles: options.initialFiles, analysisEnabled: options.analysisEnabled ?? true,
     onAnalyze: options.onAnalyze || (async image => { analyzed.push(image); return extraction(); }),
     onSaveTask: options.onSave || (async task => { saved.push(task); }),
+    onImportScreenshot: options.onImport || (async items => {
+      for (const { task } of items) {
+        if (options.onSave) await options.onSave(task);
+        else saved.push(task);
+      }
+      return items.map(({ task }) => ({ id: task.id, status: "imported" }));
+    }),
   })));
   return { saved, analyzed };
 }
@@ -75,6 +83,7 @@ test("without an enabled flag, screenshot analysis defaults off and cannot send 
   let calls = 0;
   await act(async () => root.render(createElement(TaskCreator, {
     tasks: [], disabled: false, onAnalyze: async () => { calls++; return extraction(); }, onSaveTask: async () => { throw new Error("Must not save automatically"); },
+    onImportScreenshot: async () => { throw new Error("Must not import automatically"); },
   })));
   assert.equal(query('[role="tab"][aria-selected="true"]').textContent, "Paste Screenshot");
   assert.match(container.textContent!, /Paid screenshot analysis is disabled/);
@@ -164,16 +173,30 @@ test("Analyze never saves automatically; Add Assignment persists a reviewed all-
   assert.match(query('[role="status"]').textContent!, /Task saved/);
 });
 
-test("multiple candidates require selection and save only the chosen, explicitly confirmed task", async () => {
-  const saved: Task[] = [];
-  await mount({ onAnalyze: async () => extraction([candidate({ name: "Canvas essay" }), candidate({ name: "PDF syllabus exam" })]),
-    onSave: async task => { saved.push(task); } });
+test("batch preview selects new rows, leaves duplicates and uncertain rows unselected, and submits once", async () => {
+  const existing = taskFromDraft(draftFromCandidate(candidate({ name: "PS31", course: "Math 200" }), "America/New_York"), "existing");
+  const batches: ScreenshotImportItem[][] = [];
+  await mount({ tasks: [existing], onAnalyze: async () => extraction([
+    candidate({ name: "PS30", course: "Math 200" }), candidate({ name: "PS28", course: "Math 200" }),
+    candidate({ name: "PS31", course: "Math 200" }), candidate({ name: "Partial project", dateKind: "unknown", dueDate: null }),
+    candidate({ name: "Problem Set 30", course: "Math 200" }),
+  ]), onImport: async items => {
+    batches.push(items);
+    return items.map(({ task }) => ({ id: task.id, status: "imported" }));
+  } });
   await upload(); await analyze();
-  assert.equal(container.querySelector("form"), null); assert.equal(saved.length, 0);
-  assert.equal(query<HTMLInputElement>('input[type="radio"]').checked, false);
-  await click(container.querySelectorAll<HTMLInputElement>('input[type="radio"]')[1]);
-  assert.equal(query<HTMLInputElement>('input[name="name"]').value, "PDF syllabus exam");
-  await submit(); assert.equal(saved[0].name, "PDF syllabus exam"); assert.equal(saved.length, 1);
+  assert.equal(batches.length, 0);
+  assert.equal(query<HTMLInputElement>('[aria-label="Select PS30"]').checked, true);
+  assert.equal(query<HTMLInputElement>('[aria-label="Select PS31"]').disabled, true);
+  assert.equal(query<HTMLInputElement>('[aria-label="Select Problem Set 30"]').disabled, true);
+  assert.equal(query<HTMLInputElement>('[aria-label="Select Partial project"]').disabled, true);
+  await click(query('[aria-label="Select PS28"]'));
+  await click(button("Select All New"));
+  await submit();
+  assert.equal(batches.length, 1);
+  assert.deepEqual(batches[0].map(item => item.task.name), ["PS30", "PS28"]);
+  assert.match(query('[role="status"]').textContent!, /5 assignments detected. 2 imported, 2 already existed, 1 need review/);
+  assert.match(container.textContent!, /Partial project/);
 });
 
 test("missing dates and inferred years are highlighted; uncertain details need confirmation", async () => {
