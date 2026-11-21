@@ -2,6 +2,20 @@ import sharp from "sharp";
 import { HttpError, readBoundedBody } from "./http";
 import { MAX_IMAGE_BYTES, imageFileError } from "./image-limits";
 const MAX_REQUEST_BYTES = MAX_IMAGE_BYTES + 8192;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function matchesImageSignature(bytes: Buffer, mimeType: string): boolean {
+  switch (mimeType) {
+    case "image/png":
+      return bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
+    case "image/jpeg":
+      return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+    case "image/webp":
+      return bytes.toString("latin1", 0, 4) === "RIFF" && bytes.toString("latin1", 8, 12) === "WEBP";
+    default:
+      return false;
+  }
+}
 
 export async function readImageUpload(request: Request): Promise<File> {
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("multipart/form-data;")) throw new HttpError(415, "Upload one screenshot using multipart/form-data.");
@@ -19,7 +33,10 @@ export async function normalizeImage(file: File): Promise<Buffer> {
   const error = imageFileError(file);
   if (error) throw new HttpError(file.size > MAX_IMAGE_BYTES ? 413 : 415, error);
   try {
-    const image = sharp(Buffer.from(await file.arrayBuffer()), { limitInputPixels: 16_000_000, failOn: "warning" });
+    const bytes = Buffer.from(await file.arrayBuffer());
+    // Do not let the client MIME type dispatch an unsupported format to a native parser.
+    if (!matchesImageSignature(bytes, file.type)) throw new Error("Mismatched image signature");
+    const image = sharp(bytes, { limitInputPixels: 16_000_000, failOn: "warning" });
     const metadata = await image.metadata();
     const expected: Record<string, string> = { "image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp" };
     if (metadata.format !== expected[file.type] || (metadata.pages || 1) > 1) throw new Error("Invalid image");
