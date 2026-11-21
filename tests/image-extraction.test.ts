@@ -178,6 +178,18 @@ test("streamed upload cap cannot be bypassed with a false Content-Length", async
   await assert.rejects(readImageUpload(request), status(413));
 });
 
+test("mislabeled images are rejected before opening the native metadata parser", async t => {
+  const input = await png();
+  const tiff = await sharp(await input.arrayBuffer()).tiff().toBuffer();
+  const metadata = t.mock.method(sharp.prototype, "metadata");
+  const unsupported = new File([new Uint8Array(tiff)], "screenshot.png", { type: "image/png" });
+  const mismatched = new File([await input.arrayBuffer()], "screenshot.webp", { type: "image/webp" });
+
+  await assert.rejects(normalizeImage(unsupported), status(415));
+  await assert.rejects(normalizeImage(mismatched), status(415));
+  assert.equal(metadata.mock.callCount(), 0);
+});
+
 test("authentication and same-origin checks precede reading images and AI; missing config is graceful", async () => {
   let reads = 0, paidCalls = 0;
   const request = new Request(origin, { method: "POST", headers: { Origin: origin } });
